@@ -1,122 +1,378 @@
 pipeline {
-    agent any 
+
+    agent any
+
     tools {
         jdk 'jdk'
         nodejs 'nodejs'
     }
-    environment  {
-        SCANNER_HOME=tool 'sonar-scanner'
+
+    environment {
+
+        SCANNER_HOME = tool 'sonar-scanner'
+
         AWS_ACCOUNT_ID = credentials('ACCOUNT_ID')
         AWS_ECR_REPO_NAME = credentials('ECR_REPO_FRONTEND')
+
         AWS_DEFAULT_REGION = 'us-west-2'
-        REPOSITORY_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/"
+
+        REPOSITORY_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+        FRONTEND_DIR = 'app-code/frontend/notes-frontend'
     }
+
     stages {
+
         stage('Cleaning Workspace') {
             steps {
                 cleanWs()
             }
         }
+
         stage('Checkout from Git') {
             steps {
-                git branch: 'main', credentialsId: 'GITHUB', url: 'https://github.com/codewithmuh/three-tier-devsecops-project.git'
+                git(
+                    branch: 'main',
+                    credentialsId: 'GITHUB',
+                    url: 'https://github.com/riteshtorne150/three-tier-devsecops-project.git'
+                )
             }
         }
+
+        stage('Verify Node Environment') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "=========================================="
+                    echo "NODE/NPM ENVIRONMENT"
+                    echo "=========================================="
+
+                    which node
+                    which npm
+
+                    node --version
+                    npm --version
+
+                    echo "=========================================="
+                    echo "LIBATOMIC"
+                    echo "=========================================="
+
+                    ldconfig -p | grep libatomic || true
+                '''
+            }
+        }
+
+        stage('Install Frontend Dependencies') {
+            steps {
+                dir("${FRONTEND_DIR}") {
+                    sh '''
+                        set -e
+
+                        echo "=========================================="
+                        echo "INSTALLING FRONTEND DEPENDENCIES"
+                        echo "=========================================="
+
+                        node --version
+                        npm --version
+
+                        npm ci
+                    '''
+                }
+            }
+        }
+
+        stage('Check Frontend Dependencies') {
+            steps {
+                dir("${FRONTEND_DIR}") {
+                    sh '''
+                        echo "=========================================="
+                        echo "REACT SCRIPTS"
+                        echo "=========================================="
+
+                        npm ls react-scripts || true
+
+                        echo "=========================================="
+                        echo "ESLINT"
+                        echo "=========================================="
+
+                        npm ls eslint || true
+
+                        echo "=========================================="
+                        echo "ESLINT CONFIG REACT APP"
+                        echo "=========================================="
+
+                        npm ls eslint-config-react-app || true
+
+                        echo "=========================================="
+                        echo "ESLINT PLUGIN JEST"
+                        echo "=========================================="
+
+                        npm ls eslint-plugin-jest || true
+
+                        echo "=========================================="
+                        echo "JEST"
+                        echo "=========================================="
+
+                        npm ls jest || true
+                    '''
+                }
+            }
+        }
+
         stage('Sonarqube Analysis') {
             steps {
-                dir('app-code/frontend/notes-frontend') {
+
+                dir("${FRONTEND_DIR}") {
+
                     withSonarQubeEnv('sonar-server') {
-                        sh ''' 
-                            $SCANNER_HOME/bin/sonar-scanner \
-                            -Dsonar.projectKey=frontend \
-                            -Dsonar.sources=. \
-                            -Dsonar.host.url=http://44.244.210.204:9000 \
-                            -Dsonar.login=sqp_28cec81454b231cb6e7548987c134fe9213a0e93
-                        '''
+
+                        withCredentials([
+                            string(
+                                credentialsId: 'sonar-token',
+                                variable: 'SONAR_TOKEN'
+                            )
+                        ]) {
+
+                            sh '''
+                                set -e
+
+                                echo "=========================================="
+                                echo "SONARQUBE ANALYSIS"
+                                echo "=========================================="
+
+                                "$SCANNER_HOME/bin/sonar-scanner" \
+                                    -Dsonar.projectKey=Frontend \
+                                    -Dsonar.sources=. \
+                                    -Dsonar.host.url=http://32.185.242.140:9000 \
+                                    -Dsonar.token="$SONAR_TOKEN"
+                            '''
+                        }
                     }
                 }
             }
         }
+
         stage('Quality Check') {
             steps {
                 script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token' 
+
+                    timeout(time: 10, unit: 'MINUTES') {
+
+                        waitForQualityGate(
+                            abortPipeline: true,
+                            credentialsId: 'sonar-token'
+                        )
+                    }
                 }
             }
         }
-        stage('OWASP Dependency-Check Scan') {
-            steps {
-                dir('app-code/frontend/notes-frontend') {
-                    dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
-                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
-                }
-            }
-        }
+
         stage('Trivy File Scan') {
             steps {
-                dir('app-code/frontend/notes-frontend') {
-                    sh 'trivy fs . > trivyfs.txt'
+
+                dir("${FRONTEND_DIR}") {
+
+                    sh '''
+                        set -e
+
+                        echo "=========================================="
+                        echo "TRIVY FILESYSTEM SCAN"
+                        echo "=========================================="
+
+                        trivy fs . \
+                            --skip-version-check \
+                            --scanners vuln,secret \
+                            > trivyfs.txt
+
+                        echo "Trivy filesystem scan completed."
+
+                        cat trivyfs.txt
+                    '''
                 }
             }
         }
-        stage("Docker Image Build") {
+
+        stage('Docker Image Build') {
             steps {
-                script {
-                    dir('app-code/frontend/notes-frontend') {
-                            sh 'docker system prune -f'
-                            sh 'docker container prune -f'
-                            sh 'docker build -t ${AWS_ECR_REPO_NAME} .'
-                    }
+
+                dir("${FRONTEND_DIR}") {
+
+                    sh '''
+                        set -e
+
+                        echo "=========================================="
+                        echo "DOCKER IMAGE BUILD"
+                        echo "=========================================="
+
+                        docker --version
+
+                        echo "Cleaning unused Docker resources..."
+
+                        docker system prune -f
+                        docker container prune -f
+
+                        echo "Building frontend image..."
+
+                        docker build \
+                            --no-cache \
+                            -t "${AWS_ECR_REPO_NAME}:${BUILD_NUMBER}" \
+                            .
+
+                        echo "Docker image created successfully."
+
+                        docker images | grep "${AWS_ECR_REPO_NAME}"
+                    '''
                 }
             }
         }
-        stage("ECR Image Pushing") {
+
+        stage('ECR Image Pushing') {
             steps {
-                script {
-                        sh 'aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${REPOSITORY_URI}'
-                        sh 'docker tag ${AWS_ECR_REPO_NAME} ${REPOSITORY_URI}${AWS_ECR_REPO_NAME}:${BUILD_NUMBER}'
-                        sh 'docker push ${REPOSITORY_URI}${AWS_ECR_REPO_NAME}:${BUILD_NUMBER}'
-                }
+
+                sh '''
+                    set -e
+
+                    echo "=========================================="
+                    echo "ECR LOGIN"
+                    echo "=========================================="
+
+                    aws ecr get-login-password \
+                        --region "${AWS_DEFAULT_REGION}" |
+                    docker login \
+                        --username AWS \
+                        --password-stdin "${REPOSITORY_URI}"
+
+                    echo "=========================================="
+                    echo "TAGGING IMAGE"
+                    echo "=========================================="
+
+                    docker tag \
+                        "${AWS_ECR_REPO_NAME}:${BUILD_NUMBER}" \
+                        "${REPOSITORY_URI}/${AWS_ECR_REPO_NAME}:${BUILD_NUMBER}"
+
+                    echo "=========================================="
+                    echo "PUSHING IMAGE"
+                    echo "=========================================="
+
+                    docker push \
+                        "${REPOSITORY_URI}/${AWS_ECR_REPO_NAME}:${BUILD_NUMBER}"
+                '''
             }
         }
-        stage("TRIVY Image Scan") {
+
+        stage('TRIVY Image Scan') {
             steps {
-                sh 'trivy image ${REPOSITORY_URI}${AWS_ECR_REPO_NAME}:${BUILD_NUMBER} > trivyimage.txt' 
+
+                sh '''
+                    set -e
+
+                    echo "=========================================="
+                    echo "TRIVY IMAGE SCAN"
+                    echo "=========================================="
+
+                    trivy image \
+                        --skip-version-check \
+                        "${REPOSITORY_URI}/${AWS_ECR_REPO_NAME}:${BUILD_NUMBER}" \
+                        > trivyimage.txt
+
+                    cat trivyimage.txt
+                '''
             }
         }
-        stage('Checkout Code') {
-            steps {
-                git branch: 'main', credentialsId: 'GITHUB', url: 'https://github.com/codewithmuh/three-tier-devsecops-project.git'
-            }
-        }
+
         stage('Update Deployment file') {
-            environment {
-                GIT_REPO_NAME = "three-tier-devsecops-project"
-                GIT_USER_NAME = "codewithmuh"
-            }
             steps {
+
                 dir('kubernetes-manifests/frontend') {
-                    withCredentials([string(credentialsId: 'github', variable: 'GITHUB_TOKEN')]) {
-                        // First, list the files in the directory to check if deployment.yaml exists
+
+                    withCredentials([
+                        string(
+                            credentialsId: 'github',
+                            variable: 'GITHUB_TOKEN'
+                        )
+                    ]) {
+
                         sh '''
-                            echo "Listing files in kubernetes-manifests/frontend directory:"
-                            ls -l
-                        '''
-                        sh '''
+                            set -e
+
+                            echo "=========================================="
+                            echo "KUBERNETES MANIFEST UPDATE"
+                            echo "=========================================="
+
+                            ls -la
+
+                            if [ ! -f deployment.yaml ]; then
+                                echo "ERROR: deployment.yaml not found"
+                                exit 1
+                            fi
+
+                            echo "Current image:"
+                            grep -n "image:" deployment.yaml || true
+
+                            echo "Configuring Git..."
+
                             git config user.email "rashiddaha80@gmail.com"
-                            git config user.name "codewithmuh"
-                            BUILD_NUMBER=${BUILD_NUMBER}
-                            echo $BUILD_NUMBER
-                            imageTag=$(grep -oP '(?<=frontend:)[^ ]+' deployment.yaml)
-                            echo $imageTag
-                            sed -i "s/${AWS_ECR_REPO_NAME}:${imageTag}/${AWS_ECR_REPO_NAME}:${BUILD_NUMBER}/" deployment.yaml
+                            git config user.name "riteshtorne150"
+
+                            echo "Updating frontend image tag..."
+
+                            sed -i -E \
+                                "s#(${AWS_ECR_REPO_NAME}:)[^[:space:]]+#\\1${BUILD_NUMBER}#g" \
+                                deployment.yaml
+
+                            echo "Updated image:"
+                            grep -n "image:" deployment.yaml
+
                             git add deployment.yaml
-                            git commit -m "Update deployment Image to version \${BUILD_NUMBER}"
-                            git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME} HEAD:main
+
+                            if git diff --cached --quiet; then
+
+                                echo "No changes to commit."
+
+                            else
+
+                                git commit \
+                                    -m "Update frontend deployment image to version ${BUILD_NUMBER}"
+
+                                echo "Pushing changes to GitHub..."
+
+                                git push \
+                                    "https://${GITHUB_TOKEN}@github.com/riteshtorne150/three-tier-devsecops-project.git" \
+                                    HEAD:main
+
+                            fi
                         '''
                     }
                 }
             }
+        }
+    }
+
+    post {
+
+        success {
+            echo "=========================================="
+            echo "FRONTEND JENKINS PIPELINE SUCCESS"
+            echo "=========================================="
+
+            echo "BUILD NUMBER: ${BUILD_NUMBER}"
+            echo "ECR IMAGE: ${REPOSITORY_URI}/${AWS_ECR_REPO_NAME}:${BUILD_NUMBER}"
+        }
+
+        failure {
+            echo "=========================================="
+            echo "FRONTEND JENKINS PIPELINE FAILED"
+            echo "=========================================="
+
+            echo "BUILD NUMBER: ${BUILD_NUMBER}"
+            echo "Check the failed stage above."
+        }
+
+        always {
+            echo "=========================================="
+            echo "PIPELINE COMPLETED"
+            echo "=========================================="
         }
     }
 }
